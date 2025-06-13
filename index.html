@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Control LED ESP32</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/paho-mqtt.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+        text-align: center;
+        background-color: #f5f5f5;
+      }
+      .container {
+        background-color: white;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      }
+      h1 {
+        color: #333;
+      }
+      .btn {
+        border: none;
+        color: white;
+        padding: 15px 32px;
+        text-align: center;
+        text-decoration: none;
+        display: inline-block;
+        font-size: 16px;
+        margin: 10px 5px;
+        cursor: pointer;
+        border-radius: 5px;
+        transition: all 0.3s;
+      }
+      #btnOn {
+        background-color: #4caf50;
+      }
+      #btnOn:hover:not(:disabled) {
+        background-color: #45a049;
+      }
+      #btnOff {
+        background-color: #f44336;
+      }
+      #btnOff:hover:not(:disabled) {
+        background-color: #d32f2f;
+      }
+      .btn:disabled {
+        background-color: #cccccc;
+        cursor: not-allowed;
+        opacity: 0.7;
+      }
+      .status {
+        font-size: 18px;
+        margin: 20px 0;
+        padding: 10px;
+        border-radius: 5px;
+        background-color: #f8f9fa;
+      }
+      .led-status {
+        font-weight: bold;
+      }
+      #ledStatus {
+        color: #d32f2f;
+      }
+      .led-on {
+        color: #4caf50 !important;
+      }
+      .connection-status {
+        padding: 10px;
+        margin-bottom: 20px;
+        border-radius: 5px;
+        font-family: monospace;
+        text-align: left;
+        background-color: #fff3cd;
+      }
+      .connected {
+        background-color: #d4edda;
+        color: #155724;
+      }
+      .disconnected {
+        background-color: #f8d7da;
+        color: #721c24;
+      }
+      .connection-details {
+        font-size: 14px;
+        margin-top: 5px;
+        color: #666;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Control Remoto de LED</h1>
+
+      <div id="connectionStatus" class="connection-status disconnected">
+        <strong>Estado:</strong> Desconectado<br />
+        <span class="connection-details"
+          >Esperando conexión al broker MQTT...</span
+        >
+      </div>
+
+      <div class="status">
+        Estado del LED:
+        <span id="ledStatus" class="led-status">Desconocido</span>
+      </div>
+
+      <div class="button-group">
+        <button id="btnOn" class="btn" disabled>Encender LED</button>
+        <button id="btnOff" class="btn" disabled>Apagar LED</button>
+      </div>
+    </div>
+
+    <script>
+      // Configuración MQTT
+      const config = {
+        host: "bca9a7e82e534677816f07a68aa2c238.s1.eu.hivemq.cloud",
+        port: 8884, // Puerto SSL
+        clientId: "webclient_" + Math.random().toString(36).substr(2, 8),
+        username: "hivemq.webclient.1749772269074", // Dejar vacío para broker público
+        password: "!g0I&LE8X4Nfh1Frl>;q",
+        controlTopic: "esp32/led/control",
+        statusTopic: "esp32/led/status",
+        timeout: 10,
+        keepAlive: 30,
+      };
+
+      // Variables de estado
+      let mqttClient = null;
+      let isConnected = false;
+      let ledState = false;
+      let reconnectTimer = null;
+      let reconnectAttempts = 0;
+
+      // Elementos de la UI
+      const connectionStatus = document.getElementById("connectionStatus");
+      const ledStatus = document.getElementById("ledStatus");
+      const btnOn = document.getElementById("btnOn");
+      const btnOff = document.getElementById("btnOff");
+
+      // Inicialización cuando se carga la página
+      window.addEventListener("load", function () {
+        initMQTT();
+        setupEventListeners();
+      });
+
+      function setupEventListeners() {
+        btnOn.addEventListener("click", function () {
+          sendCommand("on");
+        });
+
+        btnOff.addEventListener("click", function () {
+          sendCommand("off");
+        });
+      }
+
+      function initMQTT() {
+        // Limpiar conexión previa si existe
+        if (mqttClient && mqttClient.isConnected()) {
+          mqttClient.disconnect();
+        }
+
+        // Crear nuevo cliente MQTT
+        mqttClient = new Paho.Client(config.host, config.port, config.clientId);
+
+        // Configurar handlers
+        mqttClient.onConnectionLost = onConnectionLost;
+        mqttClient.onMessageArrived = onMessageArrived;
+
+        // Opciones de conexión
+        const options = {
+          timeout: config.timeout,
+          keepAliveInterval: config.keepAlive,
+          cleanSession: true,
+          useSSL: true,
+          mqttVersion: 4, // MQTT 3.1.1
+          onSuccess: onConnectSuccess,
+          onFailure: onConnectFailure,
+        };
+
+        // Agregar credenciales solo si existen
+        if (config.username) options.userName = config.username;
+        if (config.password) options.password = config.password;
+
+        updateConnectionStatus("Conectando al broker...", false);
+
+        try {
+          console.log("Intentando conexión MQTT...");
+          mqttClient.connect(options);
+        } catch (error) {
+          console.error("Error al conectar:", error);
+          updateConnectionStatus("Error en conexión: " + error.message, false);
+          scheduleReconnect();
+        }
+      }
+
+      function onConnectSuccess() {
+        console.log("Conexión MQTT establecida con éxito");
+        isConnected = true;
+        reconnectAttempts = 0;
+
+        // Suscribirse al topic de estado
+        mqttClient.subscribe(config.statusTopic, { qos: 1 });
+        console.log("Suscrito al topic:", config.statusTopic);
+
+        updateConnectionStatus("Conectado a " + config.host, true);
+        enableButtons();
+
+        // Solicitar estado actual del LED
+        sendCommand("get");
+      }
+
+      function onConnectFailure(error) {
+        console.error("Fallo en conexión MQTT:", error.errorMessage);
+        updateConnectionStatus(
+          "Error de conexión: " + error.errorMessage,
+          false
+        );
+        disableButtons();
+        scheduleReconnect();
+      }
+
+      function onConnectionLost(response) {
+        console.warn("Conexión perdida:", response.errorMessage);
+        isConnected = false;
+        updateConnectionStatus(
+          "Conexión perdida: " + response.errorMessage,
+          false
+        );
+        disableButtons();
+        scheduleReconnect();
+      }
+
+      function onMessageArrived(message) {
+        console.log(
+          "Mensaje recibido:",
+          message.payloadString,
+          "en",
+          message.destinationName
+        );
+
+        if (message.destinationName === config.statusTopic) {
+          const newState = message.payloadString === "on";
+          updateLEDState(newState);
+        }
+      }
+
+      function sendCommand(command) {
+        if (!isConnected || !mqttClient) {
+          console.warn("No se puede enviar comando - Desconectado");
+          return;
+        }
+
+        const message = new Paho.Message(command);
+        message.destinationName = config.controlTopic;
+        message.qos = 1;
+        message.retained = false;
+
+        try {
+          mqttClient.send(message);
+          console.log("Comando enviado:", command);
+        } catch (error) {
+          console.error("Error enviando mensaje:", error);
+          updateConnectionStatus(
+            "Error enviando comando: " + error.message,
+            false
+          );
+        }
+      }
+
+      function updateLEDState(isOn) {
+        ledState = isOn;
+        ledStatus.textContent = isOn ? "ENCENDIDO" : "APAGADO";
+        ledStatus.className = isOn ? "led-status led-on" : "led-status";
+
+        // Actualizar estado visual de los botones
+        btnOn.disabled = isOn;
+        btnOff.disabled = !isOn;
+      }
+
+      function updateConnectionStatus(message, connected) {
+        const statusText = connected
+          ? `<strong>Estado:</strong> Conectado<br>
+                 <span class="connection-details">${message}</span>`
+          : `<strong>Estado:</strong> Desconectado<br>
+                 <span class="connection-details">${message}</span>`;
+
+        connectionStatus.innerHTML = statusText;
+        connectionStatus.className = connected
+          ? "connection-status connected"
+          : "connection-status disconnected";
+      }
+
+      function enableButtons() {
+        btnOn.disabled = false;
+        btnOff.disabled = false;
+        // Deshabilitar el botón correspondiente al estado actual
+        if (ledState) {
+          btnOn.disabled = true;
+        } else {
+          btnOff.disabled = true;
+        }
+      }
+
+      function disableButtons() {
+        btnOn.disabled = true;
+        btnOff.disabled = true;
+      }
+
+      function scheduleReconnect() {
+        // Limpiar timer anterior si existe
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+        }
+
+        // Lógica de backoff exponencial
+        reconnectAttempts++;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Máximo 30 segundos
+
+        console.log(`Programando reconexión en ${delay / 1000} segundos...`);
+        updateConnectionStatus(
+          `Intentando reconexión #${reconnectAttempts} en ${Math.round(
+            delay / 1000
+          )} segundos...`,
+          false
+        );
+
+        reconnectTimer = setTimeout(function () {
+          console.log("Intentando reconexión...");
+          initMQTT();
+        }, delay);
+      }
+    </script>
+  </body>
+</html>
